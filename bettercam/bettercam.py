@@ -22,8 +22,9 @@ class BetterCam:
         output: Output,
         device: Device,
         region: Tuple[int, int, int, int],
-        output_color: str = "RGB",
+        output_color: str = "BGRA",
         nvidia_gpu: bool = False,
+        torch_cuda: bool = False,
         max_buffer_len=64,
     ) -> None:
         self._output: Output = output
@@ -35,13 +36,20 @@ class BetterCam:
             output=self._output, device=self._device
         )
         self.nvidia_gpu = nvidia_gpu
-        # if nvidia_gpu:
-        #     import cupy as np
-        self._processor: Processor = Processor(output_color=output_color, nvidia_gpu=nvidia_gpu)
+        self.torch_cuda = torch_cuda
+
+        # Set the rotation angle from the output device
+        self.rotation_angle: int = self._output.rotation_angle
+        # Initialize Processor with the rotation angle and backend
+        self._processor: Processor = Processor(
+            output_color=output_color, 
+            nvidia_gpu=nvidia_gpu,
+            torch_cuda=torch_cuda,
+            rotation_angle=self.rotation_angle
+        )
 
         self.width, self.height = self._output.resolution
         self.channel_size = len(output_color) if output_color != "GRAY" else 1
-        self.rotation_angle: int = self._output.rotation_angle
 
         self._region_set_by_user = region is not None
         self.region: Tuple[int, int, int, int] = region
@@ -66,14 +74,18 @@ class BetterCam:
 
         self.__frame_count = 0
         self.__capture_start_time = 0
-
+        
     def grab(self, region: Tuple[int, int, int, int] = None):
         if region is None:
             region = self.region
         else:
             self._validate_region(region)
         frame = self._grab(region)
-        return frame
+        if frame is not None:
+            return frame
+        else:
+            self._on_output_change()
+            return None
 
     def _grab(self, region: Tuple[int, int, int, int]):
         if self._duplicator.update_frame():
@@ -84,9 +96,7 @@ class BetterCam:
             )
             self._duplicator.release_frame()
             rect = self._stagesurf.map()
-            frame = self._processor.process(
-                rect, self.width, self.height, region, self.rotation_angle
-            )
+            frame = self._processor.process(rect, self.width, self.height, region)
             self._stagesurf.unmap()
             return frame
         else:
@@ -94,7 +104,7 @@ class BetterCam:
             return None
 
     def _on_output_change(self):
-        time.sleep(0.1)  # Wait for Display mode change (Access Lost)
+        time.sleep(0.05)  # Wait for Display mode change (Access Lost)
         self._duplicator.release()
         self._stagesurf.release()
         self._output.update_desc()
@@ -120,17 +130,16 @@ class BetterCam:
         video_mode=False,
         delay: int = 0,
     ):
-        if delay != 0:
-            time.sleep(delay)
-            self._on_output_change()
+        #if delay != 0:
+            #time.sleep(delay)
+            #self._on_output_change()
         if region is None:
             region = self.region
-        self._validate_region(region)
+        #self._validate_region(region)
         self.is_capturing = True
         frame_shape = (region[3] - region[1], region[2] - region[0], self.channel_size)
-        self.__frame_buffer = np.ndarray(
-            (self.max_buffer_len, *frame_shape), dtype=np.uint8
-        )
+        #self.__frame_buffer = np.ndarray((self.max_buffer_len, *frame_shape), dtype=np.uint8)
+        self.__frame_buffer = np.zeros((self.max_buffer_len, *frame_shape), dtype=np.uint8)
         self.__thread = Thread(
             target=self.__capture,
             name="BetterCam",
@@ -169,6 +178,7 @@ class BetterCam:
         self.__capture_start_time = time.perf_counter()
 
         capture_error = None
+        last_valid_frame = None  # Mantieni l'ultimo frame valido
 
         while not self.__stop_capture.is_set():
             if self.__timer_handle:
@@ -179,26 +189,18 @@ class BetterCam:
                     continue
             try:
                 frame = self._grab(region)
+                if frame is None and video_mode and last_valid_frame is not None:
+                    # Utilizza l'ultimo frame valido se in modalità video e nessun nuovo frame è disponibile
+                    frame = last_valid_frame
                 if frame is not None:
                     with self.__lock:
                         self.__frame_buffer[self.__head] = frame
-                        if self.__full:
-                            self.__tail = (self.__tail + 1) % self.max_buffer_len
                         self.__head = (self.__head + 1) % self.max_buffer_len
+                        if self.__head == self.__tail:
+                            self.__tail = (self.__tail + 1) % self.max_buffer_len
                         self.__frame_available.set()
                         self.__frame_count += 1
-                        self.__full = self.__head == self.__tail
-                elif video_mode:
-                    with self.__lock:
-                        self.__frame_buffer[self.__head] = np.array(
-                            self.__frame_buffer[(self.__head - 1) % self.max_buffer_len]
-                        )
-                        if self.__full:
-                            self.__tail = (self.__tail + 1) % self.max_buffer_len
-                        self.__head = (self.__head + 1) % self.max_buffer_len
-                        self.__frame_available.set()
-                        self.__frame_count += 1
-                        self.__full = self.__head == self.__tail
+                        last_valid_frame = frame
             except Exception as e:
                 import traceback
 
@@ -215,6 +217,7 @@ class BetterCam:
         print(
             f"Screen Capture FPS: {int(self.__frame_count/(time.perf_counter() - self.__capture_start_time))}"
         )
+
 
     def _rebuild_frame_buffer(self, region: Tuple[int, int, int, int]):
         if region is None:
@@ -255,3 +258,5 @@ class BetterCam:
             self._stagesurf,
             self._duplicator,
         )
+
+

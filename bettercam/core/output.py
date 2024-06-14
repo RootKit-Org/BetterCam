@@ -57,3 +57,4 @@ class Output:
             self.resolution,
             self.rotation_angle,
         )
+

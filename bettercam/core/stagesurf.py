@@ -66,3 +66,4 @@ class StageSurface:
             (self.width, self.height),
             "DXGI_FORMAT_B8G8R8A8_UNORM",
         )
+

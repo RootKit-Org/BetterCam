@@ -79,3 +79,4 @@ class Device:
             self.desc.DedicatedVideoMemory // 1048576,
             self.desc.VendorId,
         )
+
